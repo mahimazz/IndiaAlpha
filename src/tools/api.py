@@ -26,50 +26,148 @@ from src.data.models import (
 _cache = get_cache()
 
 
+# ─── Indian Stock Helpers (yfinance) ───────────────────────────────────────────
+
+def _is_indian_ticker(ticker: str) -> bool:
+    """Check if ticker is an Indian stock (NSE or BSE)."""
+    return ticker.endswith(".NS") or ticker.endswith(".BO")
+
+
+def _get_yfinance_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
+    """Fetch price data using yfinance for Indian stocks."""
+    try:
+        import yfinance as yf
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        if df.empty:
+            logger.warning("yfinance returned empty data for %s", ticker)
+            return []
+        prices = []
+        for date, row in df.iterrows():
+            def _val(col):
+                v = row[col]
+                return float(v.iloc[0]) if hasattr(v, "iloc") else float(v)
+            prices.append(Price(
+                open=_val("Open"),
+                close=_val("Close"),
+                high=_val("High"),
+                low=_val("Low"),
+                volume=_val("Volume"),
+                time=date.strftime("%Y-%m-%dT00:00:00Z"),
+            ))
+        return prices
+    except Exception as e:
+        logger.warning("yfinance prices failed for %s: %s", ticker, e)
+        return []
+
+
+def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
+    """Fetch financial metrics using yfinance for Indian stocks."""
+    try:
+        import yfinance as yf
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        if not info:
+            return []
+
+        # Compute derived metrics from financials if available
+        gross_margin = ev_to_ebitda = ev_to_revenue = None
+        ev = info.get("enterpriseValue")
+        try:
+            fin = stock.financials
+            gross_profit = fin.loc["Gross Profit"].iloc[0] if "Gross Profit" in fin.index else None
+            total_revenue = fin.loc["Total Revenue"].iloc[0] if "Total Revenue" in fin.index else None
+            ebitda = fin.loc["EBITDA"].iloc[0] if "EBITDA" in fin.index else None
+            gross_margin = float(gross_profit / total_revenue) if gross_profit and total_revenue else None
+            ev_to_ebitda = float(ev / ebitda) if ev and ebitda else None
+            ev_to_revenue = float(ev / total_revenue) if ev and total_revenue else None
+        except Exception:
+            pass
+
+        return [FinancialMetrics(
+            ticker=ticker,
+            report_period=datetime.datetime.now().strftime("%Y-%m-%d"),
+            period="ttm",
+            currency=info.get("currency", "INR"),
+            market_cap=info.get("marketCap"),
+            enterprise_value=ev,
+            price_to_earnings_ratio=info.get("trailingPE"),
+            price_to_book_ratio=info.get("priceToBook"),
+            price_to_sales_ratio=info.get("priceToSalesTrailing12Months"),
+            enterprise_value_to_ebitda_ratio=ev_to_ebitda,
+            enterprise_value_to_revenue_ratio=ev_to_revenue,
+            free_cash_flow_yield=None,
+            peg_ratio=info.get("pegRatio"),
+            gross_margin=gross_margin,
+            operating_margin=info.get("operatingMargins"),
+            net_margin=info.get("profitMargins"),
+            return_on_equity=info.get("returnOnEquity"),
+            return_on_assets=info.get("returnOnAssets"),
+            return_on_invested_capital=None,
+            asset_turnover=None,
+            inventory_turnover=None,
+            receivables_turnover=None,
+            days_sales_outstanding=None,
+            operating_cycle=None,
+            working_capital_turnover=None,
+            current_ratio=info.get("currentRatio"),
+            quick_ratio=info.get("quickRatio"),
+            cash_ratio=None,
+            operating_cash_flow_ratio=None,
+            debt_to_equity=info.get("debtToEquity"),
+            debt_to_assets=None,
+            interest_coverage=None,
+            revenue_growth=info.get("revenueGrowth"),
+            earnings_growth=info.get("earningsGrowth"),
+            book_value_growth=None,
+            earnings_per_share_growth=None,
+            free_cash_flow_growth=None,
+            operating_income_growth=None,
+            ebitda_growth=None,
+            payout_ratio=info.get("payoutRatio"),
+            earnings_per_share=info.get("trailingEps"),
+            book_value_per_share=info.get("bookValue"),
+            free_cash_flow_per_share=info.get("freeCashflow"),
+        )]
+    except Exception as e:
+        logger.warning("yfinance metrics failed for %s: %s", ticker, e)
+        return []
+
+
+# ─── API Request Helper ────────────────────────────────────────────────────────
+
 def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: dict = None, max_retries: int = 3) -> requests.Response:
-    """
-    Make an API request with rate limiting handling and moderate backoff.
-    
-    Args:
-        url: The URL to request
-        headers: Headers to include in the request
-        method: HTTP method (GET or POST)
-        json_data: JSON data for POST requests
-        max_retries: Maximum number of retries (default: 3)
-    
-    Returns:
-        requests.Response: The response object
-    
-    Raises:
-        Exception: If the request fails with a non-429 error
-    """
-    for attempt in range(max_retries + 1):  # +1 for initial attempt
+    """Make an API request with rate limiting handling and moderate backoff."""
+    for attempt in range(max_retries + 1):
         if method.upper() == "POST":
             response = requests.post(url, headers=headers, json=json_data)
         else:
             response = requests.get(url, headers=headers)
-        
+
         if response.status_code == 429 and attempt < max_retries:
-            # Linear backoff: 60s, 90s, 120s, 150s...
             delay = 60 + (30 * attempt)
             print(f"Rate limited (429). Attempt {attempt + 1}/{max_retries + 1}. Waiting {delay}s before retrying...")
             time.sleep(delay)
             continue
-        
-        # Return the response (whether success, other errors, or final 429)
+
         return response
 
 
+# ─── Price Data ────────────────────────────────────────────────────────────────
+
 def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None) -> list[Price]:
     """Fetch price data from cache or API."""
-    # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date}_{end_date}"
-    
-    # Check cache first - simple exact match
+
     if cached_data := _cache.get_prices(cache_key):
         return [Price(**price) for price in cached_data]
 
-    # If not in cache, fetch from API
+    # Use yfinance for Indian stocks
+    if _is_indian_ticker(ticker):
+        prices = _get_yfinance_prices(ticker, start_date, end_date)
+        if prices:
+            _cache.set_prices(cache_key, [p.model_dump() for p in prices])
+        return prices
+
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
@@ -81,7 +179,6 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
         logger.warning("Could not fetch prices for %s (HTTP %s)", ticker, response.status_code)
         return []
 
-    # Parse response with Pydantic model
     try:
         price_response = PriceResponse(**response.json())
         prices = price_response.prices
@@ -92,10 +189,11 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     if not prices:
         return []
 
-    # Cache the results using the comprehensive cache key
     _cache.set_prices(cache_key, [p.model_dump() for p in prices])
     return prices
 
+
+# ─── Financial Metrics ─────────────────────────────────────────────────────────
 
 def get_financial_metrics(
     ticker: str,
@@ -105,14 +203,18 @@ def get_financial_metrics(
     api_key: str = None,
 ) -> list[FinancialMetrics]:
     """Fetch financial metrics from cache or API."""
-    # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{period}_{end_date}_{limit}"
-    
-    # Check cache first - simple exact match
+
     if cached_data := _cache.get_financial_metrics(cache_key):
         return [FinancialMetrics(**metric) for metric in cached_data]
 
-    # If not in cache, fetch from API
+    # Use yfinance for Indian stocks
+    if _is_indian_ticker(ticker):
+        metrics = _get_yfinance_metrics(ticker)
+        if metrics:
+            _cache.set_financial_metrics(cache_key, [m.model_dump() for m in metrics])
+        return metrics
+
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
@@ -124,7 +226,6 @@ def get_financial_metrics(
         logger.warning("Could not fetch financial metrics for %s (HTTP %s)", ticker, response.status_code)
         return []
 
-    # Parse response with Pydantic model
     try:
         metrics_response = FinancialMetricsResponse(**response.json())
         financial_metrics = metrics_response.financial_metrics
@@ -135,10 +236,11 @@ def get_financial_metrics(
     if not financial_metrics:
         return []
 
-    # Cache the results as dicts using the comprehensive cache key
     _cache.set_financial_metrics(cache_key, [m.model_dump() for m in financial_metrics])
     return financial_metrics
 
+
+# ─── Line Items ────────────────────────────────────────────────────────────────
 
 def search_line_items(
     ticker: str,
@@ -149,14 +251,17 @@ def search_line_items(
     api_key: str = None,
 ) -> list[LineItem]:
     """Fetch line items from API."""
-    # If not in cache or insufficient data, fetch from API
+    # Not available for Indian stocks via yfinance
+    if _is_indian_ticker(ticker):
+        logger.info("Line items not available for Indian ticker %s via yfinance", ticker)
+        return []
+
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
         headers["X-API-KEY"] = financial_api_key
 
     url = "https://api.financialdatasets.ai/financials/search/line-items"
-
     body = {
         "tickers": [ticker],
         "line_items": line_items,
@@ -176,12 +281,14 @@ def search_line_items(
     except (ValueError, KeyError) as e:
         logger.warning("Failed to parse line items for %s: %s", ticker, e)
         return []
+
     if not search_results:
         return []
 
-    # Cache the results
     return search_results[:limit]
 
+
+# ─── Insider Trades ────────────────────────────────────────────────────────────
 
 def get_insider_trades(
     ticker: str,
@@ -191,14 +298,15 @@ def get_insider_trades(
     api_key: str = None,
 ) -> list[InsiderTrade]:
     """Fetch insider trades from cache or API."""
-    # Create a cache key that includes all parameters to ensure exact matches
+    # Not available for Indian stocks
+    if _is_indian_ticker(ticker):
+        return []
+
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
-    # Check cache first - simple exact match
+
     if cached_data := _cache.get_insider_trades(cache_key):
         return [InsiderTrade(**trade) for trade in cached_data]
 
-    # If not in cache, fetch from API
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
@@ -231,24 +339,22 @@ def get_insider_trades(
 
         all_trades.extend(insider_trades)
 
-        # Only continue pagination if we have a start_date and got a full page
         if not start_date or len(insider_trades) < limit:
             break
 
-        # Update end_date to the oldest filing date from current batch for next iteration
         current_end_date = min(trade.filing_date for trade in insider_trades).split("T")[0]
 
-        # If we've reached or passed the start_date, we can stop
         if current_end_date <= start_date:
             break
 
     if not all_trades:
         return []
 
-    # Cache the results using the comprehensive cache key
     _cache.set_insider_trades(cache_key, [trade.model_dump() for trade in all_trades])
     return all_trades
 
+
+# ─── Company News ──────────────────────────────────────────────────────────────
 
 def get_company_news(
     ticker: str,
@@ -258,14 +364,15 @@ def get_company_news(
     api_key: str = None,
 ) -> list[CompanyNews]:
     """Fetch company news from cache or API."""
-    # Create a cache key that includes all parameters to ensure exact matches
+    # Not available for Indian stocks via this API
+    if _is_indian_ticker(ticker):
+        return []
+
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
-    # Check cache first - simple exact match
+
     if cached_data := _cache.get_company_news(cache_key):
         return [CompanyNews(**news) for news in cached_data]
 
-    # If not in cache, fetch from API
     headers = {}
     financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
     if financial_api_key:
@@ -298,24 +405,22 @@ def get_company_news(
 
         all_news.extend(company_news)
 
-        # Only continue pagination if we have a start_date and got a full page
         if not start_date or len(company_news) < limit:
             break
 
-        # Update end_date to the oldest date from current batch for next iteration
         current_end_date = min(news.date for news in company_news).split("T")[0]
 
-        # If we've reached or passed the start_date, we can stop
         if current_end_date <= start_date:
             break
 
     if not all_news:
         return []
 
-    # Cache the results using the comprehensive cache key
     _cache.set_company_news(cache_key, [news.model_dump() for news in all_news])
     return all_news
 
+
+# ─── Market Cap ────────────────────────────────────────────────────────────────
 
 def get_market_cap(
     ticker: str,
@@ -323,9 +428,17 @@ def get_market_cap(
     api_key: str = None,
 ) -> float | None:
     """Fetch market cap from the API."""
-    # Check if end_date is today
+    # Use yfinance for Indian stocks
+    if _is_indian_ticker(ticker):
+        try:
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            return info.get("marketCap")
+        except Exception as e:
+            logger.warning("yfinance market cap failed for %s: %s", ticker, e)
+            return None
+
     if end_date == datetime.datetime.now().strftime("%Y-%m-%d"):
-        # Get the market cap from company facts API
         headers = {}
         financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
         if financial_api_key:
@@ -346,12 +459,13 @@ def get_market_cap(
         return None
 
     market_cap = financial_metrics[0].market_cap
-
     if not market_cap:
         return None
 
     return market_cap
 
+
+# ─── Price Utilities ───────────────────────────────────────────────────────────
 
 def prices_to_df(prices: list[Price]) -> pd.DataFrame:
     """Convert prices to a DataFrame."""
@@ -365,7 +479,6 @@ def prices_to_df(prices: list[Price]) -> pd.DataFrame:
     return df
 
 
-# Update the get_price_data function to use the new functions
 def get_price_data(ticker: str, start_date: str, end_date: str, api_key: str = None) -> pd.DataFrame:
     prices = get_prices(ticker, start_date, end_date, api_key=api_key)
     return prices_to_df(prices)

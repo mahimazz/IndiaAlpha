@@ -1,5 +1,6 @@
 from src.graph.state import AgentState, show_agent_reasoning
 from src.tools.api import get_financial_metrics, get_market_cap, search_line_items
+from src.utils.indian_stocks import get_line_items_for_ticker, is_indian_ticker
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -33,46 +34,46 @@ def mohnish_pabrai_agent(state: AgentState, agent_id: str = "mohnish_pabrai_agen
         metrics = get_financial_metrics(ticker, end_date, period="annual", limit=8, api_key=api_key)
 
         progress.update_status(agent_id, ticker, "Gathering financial line items")
-        line_items = search_line_items(
-            ticker,
-            [
-                # Profitability and cash generation
-                "revenue",
-                "gross_profit",
-                "gross_margin",
-                "operating_income",
-                "operating_margin",
-                "net_income",
-                "free_cash_flow",
-                # Balance sheet - debt and liquidity
-                "total_debt",
-                "cash_and_equivalents",
-                "current_assets",
-                "current_liabilities",
-                "shareholders_equity",
-                # Capital intensity
-                "capital_expenditure",
-                "depreciation_and_amortization",
-                # Shares outstanding for per-share context
-                "outstanding_shares",
-            ],
-            end_date,
-            period="annual",
-            limit=8,
-            api_key=api_key,
-        )
+        if is_indian_ticker(ticker):
+            financial_line_items = get_line_items_for_ticker(
+                ticker, [], end_date
+            )
+        else:
+            financial_line_items = search_line_items(
+                ticker,
+                [
+                    "revenue",
+                    "net_income",
+                    "operating_income",
+                    "return_on_invested_capital",
+                    "gross_margin",
+                    "operating_margin",
+                    "free_cash_flow",
+                    "capital_expenditure",
+                    "cash_and_equivalents",
+                    "total_debt",
+                    "shareholders_equity",
+                    "outstanding_shares",
+                    "research_and_development",
+                    "goodwill_and_intangible_assets",
+                ],
+                end_date,
+                period="annual",
+                limit=10,
+                api_key=api_key,
+            )
 
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
 
         progress.update_status(agent_id, ticker, "Analyzing downside protection")
-        downside = analyze_downside_protection(line_items)
+        downside = analyze_downside_protection(financial_line_items)
 
         progress.update_status(agent_id, ticker, "Analyzing cash yield and valuation")
-        valuation = analyze_pabrai_valuation(line_items, market_cap)
+        valuation = analyze_pabrai_valuation(financial_line_items, market_cap)
 
         progress.update_status(agent_id, ticker, "Assessing potential to double")
-        double_potential = analyze_double_potential(line_items, market_cap)
+        double_potential = analyze_double_potential(financial_line_items, market_cap)
 
         # Combine to an overall score in spirit of Pabrai: heavily weight downside and cash yield
         total_score = (

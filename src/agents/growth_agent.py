@@ -36,7 +36,7 @@ def growth_analyst_agent(state: AgentState, agent_id: str = "growth_analyst_agen
             limit=12, # 3 years of ttm data
             api_key=api_key,
         )
-        if not financial_metrics or len(financial_metrics) < 4:
+        if not financial_metrics or len(financial_metrics) < 1:
             progress.update_status(agent_id, ticker, "Failed: Not enough financial metrics")
             continue
         

@@ -13,6 +13,7 @@ from src.tools.api import (
     get_market_cap,
     search_line_items,
 )
+from src.utils.indian_stocks import get_line_items_for_ticker, is_indian_ticker
 from src.utils.api_key import get_api_key_from_state
 from src.utils.llm import call_llm
 from src.utils.progress import progress
@@ -47,34 +48,47 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
         metrics = get_financial_metrics(ticker, end_date, period="ttm", limit=5, api_key=api_key)
 
         progress.update_status(agent_id, ticker, "Fetching financial line items")
-        line_items = search_line_items(
-            ticker,
-            [
-                "free_cash_flow",
-                "ebit",
-                "interest_expense",
-                "capital_expenditure",
-                "depreciation_and_amortization",
-                "outstanding_shares",
-                "net_income",
-                "total_debt",
-            ],
-            end_date,
-            api_key=api_key,
-        )
+        if is_indian_ticker(ticker):
+            financial_line_items = get_line_items_for_ticker(
+                ticker, [], end_date
+            )
+        else:
+            financial_line_items = search_line_items(
+                ticker,
+                [
+                    "revenue",
+                    "net_income",
+                    "operating_income",
+                    "return_on_invested_capital",
+                    "gross_margin",
+                    "operating_margin",
+                    "free_cash_flow",
+                    "capital_expenditure",
+                    "cash_and_equivalents",
+                    "total_debt",
+                    "shareholders_equity",
+                    "outstanding_shares",
+                    "research_and_development",
+                    "goodwill_and_intangible_assets",
+                ],
+                end_date,
+                period="annual",
+                limit=10,
+                api_key=api_key,
+            )
 
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
 
         # ─── Analyses ───────────────────────────────────────────────────────────
         progress.update_status(agent_id, ticker, "Analyzing growth and reinvestment")
-        growth_analysis = analyze_growth_and_reinvestment(metrics, line_items)
+        growth_analysis = analyze_growth_and_reinvestment(metrics, financial_line_items)
 
         progress.update_status(agent_id, ticker, "Analyzing risk profile")
-        risk_analysis = analyze_risk_profile(metrics, line_items)
+        risk_analysis = analyze_risk_profile(metrics, financial_line_items)
 
         progress.update_status(agent_id, ticker, "Calculating intrinsic value (DCF)")
-        intrinsic_val_analysis = calculate_intrinsic_value_dcf(metrics, line_items, risk_analysis)
+        intrinsic_val_analysis = calculate_intrinsic_value_dcf(metrics, financial_line_items, risk_analysis)
 
         progress.update_status(agent_id, ticker, "Assessing relative valuation")
         relative_val_analysis = analyze_relative_valuation(metrics)
@@ -140,7 +154,7 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
 # ────────────────────────────────────────────────────────────────────────────────
 # Helper analyses
 # ────────────────────────────────────────────────────────────────────────────────
-def analyze_growth_and_reinvestment(metrics: list, line_items: list) -> dict[str, any]:
+def analyze_growth_and_reinvestment(metrics: list, financial_line_items: list) -> dict[str, any]:
     """
     Growth score (0-4):
       +2  5-yr CAGR of revenue > 8 %
@@ -174,7 +188,7 @@ def analyze_growth_and_reinvestment(metrics: list, line_items: list) -> dict[str
         details.append("Revenue data incomplete")
 
     # FCFF growth (proxy: free_cash_flow trend)
-    fcfs = [li.free_cash_flow for li in reversed(line_items) if li.free_cash_flow]
+    fcfs = [li.free_cash_flow for li in reversed(financial_line_items) if li.free_cash_flow]
     if len(fcfs) >= 2 and fcfs[-1] > fcfs[0]:
         score += 1
         details.append("Positive FCFF growth")
@@ -190,7 +204,7 @@ def analyze_growth_and_reinvestment(metrics: list, line_items: list) -> dict[str
     return {"score": score, "max_score": max_score, "details": "; ".join(details), "metrics": latest.model_dump()}
 
 
-def analyze_risk_profile(metrics: list, line_items: list) -> dict[str, any]:
+def analyze_risk_profile(metrics: list, financial_line_items: list) -> dict[str, any]:
     """
     Risk score (0-3):
       +1  Beta < 1.3
@@ -282,7 +296,7 @@ def analyze_relative_valuation(metrics: list) -> dict[str, any]:
 # ────────────────────────────────────────────────────────────────────────────────
 # Intrinsic value via FCFF DCF (Damodaran style)
 # ────────────────────────────────────────────────────────────────────────────────
-def calculate_intrinsic_value_dcf(metrics: list, line_items: list, risk_analysis: dict) -> dict[str, any]:
+def calculate_intrinsic_value_dcf(metrics: list, financial_line_items: list, risk_analysis: dict) -> dict[str, any]:
     """
     FCFF DCF with:
       • Base FCFF = latest free cash flow
@@ -290,12 +304,12 @@ def calculate_intrinsic_value_dcf(metrics: list, line_items: list, risk_analysis
       • Fade linearly to terminal growth 2.5 % by year 10
       • Discount @ cost of equity (no debt split given data limitations)
     """
-    if not metrics or len(metrics) < 2 or not line_items:
+    if not metrics or len(metrics) < 2 or not financial_line_items:
         return {"intrinsic_value": None, "details": ["Insufficient data"]}
 
     latest_m = metrics[0]
     fcff0 = getattr(latest_m, "free_cash_flow", None)
-    shares = getattr(line_items[0], "outstanding_shares", None)
+    shares = getattr(financial_line_items[0], "outstanding_shares", None)
     if not fcff0 or not shares:
         return {"intrinsic_value": None, "details": ["Missing FCFF or share count"]}
 

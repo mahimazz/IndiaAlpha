@@ -7,6 +7,7 @@ from src.tools.api import (
     get_company_news,
     get_prices,
 )
+from src.utils.indian_stocks import get_line_items_for_ticker, is_indian_ticker
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -51,30 +52,34 @@ def stanley_druckenmiller_agent(state: AgentState, agent_id: str = "stanley_druc
         #   - Valuation: net_income, free_cash_flow, ebit, ebitda
         #   - Leverage: total_debt, shareholders_equity
         #   - Liquidity: cash_and_equivalents
-        financial_line_items = search_line_items(
-            ticker,
-            [
-                "revenue",
-                "earnings_per_share",
-                "net_income",
-                "operating_income",
-                "gross_margin",
-                "operating_margin",
-                "free_cash_flow",
-                "capital_expenditure",
-                "cash_and_equivalents",
-                "total_debt",
-                "shareholders_equity",
-                "outstanding_shares",
-                "ebit",
-                "ebitda",
-            ],
-            end_date,
-            period="annual",
-            limit=5,
-            api_key=api_key,
-        )
-
+        if is_indian_ticker(ticker):
+            financial_line_items = get_line_items_for_ticker(
+                ticker, [], end_date
+            )
+        else:
+            financial_line_items = search_line_items(
+                ticker,
+                [
+                    "revenue",
+                    "net_income",
+                    "operating_income",
+                    "return_on_invested_capital",
+                    "gross_margin",
+                    "operating_margin",
+                    "free_cash_flow",
+                    "capital_expenditure",
+                    "cash_and_equivalents",
+                    "total_debt",
+                    "shareholders_equity",
+                    "outstanding_shares",
+                    "research_and_development",
+                    "goodwill_and_intangible_assets",
+                ],
+                end_date,
+                period="annual",
+                limit=10,
+                api_key=api_key,
+            )
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
 
@@ -428,7 +433,7 @@ def analyze_druckenmiller_valuation(financial_line_items: list, market_cap: floa
       - P/E
       - P/FCF
       - EV/EBIT
-      - EV/EBITDA
+      - EV/EBIT
     Each can yield up to 2 points => max 8 raw points => scale to 0–10.
     """
     if not financial_line_items or market_cap is None:
@@ -441,7 +446,7 @@ def analyze_druckenmiller_valuation(financial_line_items: list, market_cap: floa
     net_incomes = [fi.net_income for fi in financial_line_items if fi.net_income is not None]
     fcf_values = [fi.free_cash_flow for fi in financial_line_items if fi.free_cash_flow is not None]
     ebit_values = [fi.ebit for fi in financial_line_items if fi.ebit is not None]
-    ebitda_values = [fi.ebitda for fi in financial_line_items if fi.ebitda is not None]
+    ebit_values = [fi.ebit for fi in financial_line_items if fi.ebit is not None]
 
     # For EV calculation, let's get the most recent total_debt & cash
     debt_values = [fi.total_debt for fi in financial_line_items if fi.total_debt is not None]
@@ -502,22 +507,22 @@ def analyze_druckenmiller_valuation(financial_line_items: list, market_cap: floa
     else:
         details.append("No valid EV/EBIT because EV <= 0 or EBIT <= 0")
 
-    # 4) EV/EBITDA
-    recent_ebitda = ebitda_values[0] if ebitda_values else None
-    if enterprise_value > 0 and recent_ebitda and recent_ebitda > 0:
-        ev_ebitda = enterprise_value / recent_ebitda
-        ev_ebitda_points = 0
-        if ev_ebitda < 10:
-            ev_ebitda_points = 2
-            details.append(f"Attractive EV/EBITDA: {ev_ebitda:.2f}")
-        elif ev_ebitda < 18:
-            ev_ebitda_points = 1
-            details.append(f"Fair EV/EBITDA: {ev_ebitda:.2f}")
+    # 4) EV/EBIT
+    recent_ebit = ebit_values[0] if ebit_values else None
+    if enterprise_value > 0 and recent_ebit and recent_ebit > 0:
+        ev_ebit = enterprise_value / recent_ebit
+        ev_ebit_points = 0
+        if ev_ebit < 10:
+            ev_ebit_points = 2
+            details.append(f"Attractive EV/EBIT: {ev_ebit:.2f}")
+        elif ev_ebit < 18:
+            ev_ebit_points = 1
+            details.append(f"Fair EV/EBIT: {ev_ebit:.2f}")
         else:
-            details.append(f"High EV/EBITDA: {ev_ebitda:.2f}")
-        raw_score += ev_ebitda_points
+            details.append(f"High EV/EBIT: {ev_ebit:.2f}")
+        raw_score += ev_ebit_points
     else:
-        details.append("No valid EV/EBITDA because EV <= 0 or EBITDA <= 0")
+        details.append("No valid EV/EBIT because EV <= 0 or EBIT <= 0")
 
     # We have up to 2 points for each of the 4 metrics => 8 raw points max
     # Scale raw_score to 0–10

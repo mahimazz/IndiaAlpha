@@ -5,6 +5,7 @@ from src.tools.api import (
     get_insider_trades,
     get_company_news,
 )
+from src.utils.indian_stocks import get_line_items_for_ticker, is_indian_ticker
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -49,27 +50,35 @@ def peter_lynch_agent(state: AgentState, agent_id: str = "peter_lynch_agent"):
     for ticker in tickers:
         progress.update_status(agent_id, ticker, "Gathering financial line items")
         # Relevant line items for Peter Lynch's approach
-        financial_line_items = search_line_items(
-            ticker,
-            [
-                "revenue",
-                "earnings_per_share",
-                "net_income",
-                "operating_income",
-                "gross_margin",
-                "operating_margin",
-                "free_cash_flow",
-                "capital_expenditure",
-                "cash_and_equivalents",
-                "total_debt",
-                "shareholders_equity",
-                "outstanding_shares",
-            ],
-            end_date,
-            period="annual",
-            limit=5,
-            api_key=api_key,
-        )
+        if is_indian_ticker(ticker):
+            financial_line_items = get_line_items_for_ticker(
+                ticker, [], end_date
+            )
+        else:
+            financial_line_items = search_line_items(
+                ticker,
+                [
+                    "revenue",
+                    "net_income",
+                    "operating_income",
+                    "return_on_invested_capital",
+                    "gross_margin",
+                    "operating_margin",
+                    "free_cash_flow",
+                    "capital_expenditure",
+                    "cash_and_equivalents",
+                    "total_debt",
+                    "shareholders_equity",
+                    "outstanding_shares",
+                    "research_and_development",
+                    "goodwill_and_intangible_assets",
+                ],
+                end_date,
+                period="annual",
+                limit=10,
+                api_key=api_key,
+            )
+
 
         progress.update_status(agent_id, ticker, "Getting market cap")
         market_cap = get_market_cap(ticker, end_date, api_key=api_key)
