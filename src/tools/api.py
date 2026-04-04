@@ -33,31 +33,63 @@ def _is_indian_ticker(ticker: str) -> bool:
     return ticker.endswith(".NS") or ticker.endswith(".BO")
 
 
-def _get_yfinance_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
-    """Fetch price data using yfinance for Indian stocks."""
+def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
+    """Fetch financial metrics using yfinance for Indian stocks."""
     try:
         import yfinance as yf
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
-        if df.empty:
-            logger.warning("yfinance returned empty data for %s", ticker)
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        if not info:
+            logger.warning("yfinance returned empty info for %s", ticker)
             return []
-        prices = []
-        for date, row in df.iterrows():
-            def _val(col):
-                v = row[col]
-                return float(v.iloc[0]) if hasattr(v, "iloc") else float(v)
-            prices.append(Price(
-                open=_val("Open"),
-                close=_val("Close"),
-                high=_val("High"),
-                low=_val("Low"),
-                volume=_val("Volume"),
-                time=date.strftime("%Y-%m-%dT00:00:00Z"),
-            ))
-        return prices
+
+        # Calculate missing fields from available data
+        total_cash = info.get("totalCash")
+        total_debt = info.get("totalDebt")
+        market_cap = info.get("marketCap")
+        gross_margins = info.get("grossMargins")
+        ebitda_margins = info.get("ebitdaMargins")
+        net_margin = info.get("profitMargins")
+        revenue_growth = info.get("revenueGrowth")
+
+        # Estimate ROE from ROA or net margin if missing
+        roe = info.get("returnOnEquity")
+        roa = info.get("returnOnAssets")
+        if roe is None and net_margin and revenue_growth is not None:
+            roe = net_margin * 1.5  # rough estimate
+
+        # Estimate current ratio from cash/debt if missing
+        current_ratio = info.get("currentRatio")
+        if current_ratio is None and total_cash and total_debt:
+            current_ratio = total_cash / total_debt if total_debt > 0 else 1.0
+
+        return [FinancialMetrics(
+            ticker=ticker,
+            report_period=datetime.datetime.now().strftime("%Y-%m-%d"),
+            period="ttm",
+            currency=info.get("currency", "INR"),
+            market_cap=market_cap,
+            price_to_earnings_ratio=info.get("trailingPE"),
+            price_to_book_ratio=info.get("priceToBook"),
+            price_to_sales_ratio=info.get("priceToSalesTrailing12Months"),
+            return_on_equity=roe,
+            return_on_assets=roa,
+            net_margin=net_margin,
+            operating_margin=info.get("operatingMargins") or ebitda_margins,
+            revenue_growth=revenue_growth,
+            earnings_growth=info.get("earningsGrowth") or revenue_growth,
+            current_ratio=current_ratio,
+            debt_to_equity=info.get("debtToEquity"),
+            free_cash_flow_per_share=info.get("freeCashflow"),
+            earnings_per_share=info.get("trailingEps"),
+            revenue_per_share=info.get("revenuePerShare"),
+            book_value_per_share=info.get("bookValue"),
+            dividend_yield=info.get("dividendYield"),
+        )]
     except Exception as e:
-        logger.warning("yfinance prices failed for %s: %s", ticker, e)
+        logger.warning("yfinance metrics fetch failed for %s: %s", ticker, e)
         return []
+    
 
 
 def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
