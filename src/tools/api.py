@@ -33,6 +33,42 @@ def _is_indian_ticker(ticker: str) -> bool:
     return ticker.endswith(".NS") or ticker.endswith(".BO")
 
 
+def _get_yfinance_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
+    """Fetch price data using yfinance for Indian stocks."""
+    try:
+        import yfinance as yf
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        if df.empty:
+            logger.warning("yfinance returned empty data for %s", ticker)
+            return []
+        prices = []
+        for date, row in df.iterrows():
+            try:
+                open_val = float(row["Open"].iloc[0]) if hasattr(row["Open"], 'iloc') else float(row["Open"])
+                close_val = float(row["Close"].iloc[0]) if hasattr(row["Close"], 'iloc') else float(row["Close"])
+                high_val = float(row["High"].iloc[0]) if hasattr(row["High"], 'iloc') else float(row["High"])
+                low_val = float(row["Low"].iloc[0]) if hasattr(row["Low"], 'iloc') else float(row["Low"])
+                volume_val = float(row["Volume"].iloc[0]) if hasattr(row["Volume"], 'iloc') else float(row["Volume"])
+            except Exception:
+                open_val = float(row["Open"])
+                close_val = float(row["Close"])
+                high_val = float(row["High"])
+                low_val = float(row["Low"])
+                volume_val = float(row["Volume"])
+            prices.append(Price(
+                open=open_val,
+                close=close_val,
+                high=high_val,
+                low=low_val,
+                volume=volume_val,
+                time=date.strftime("%Y-%m-%dT00:00:00Z"),
+            ))
+        return prices
+    except Exception as e:
+        logger.warning("yfinance price fetch failed for %s: %s", ticker, e)
+        return []
+
+
 def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
     """Fetch financial metrics using yfinance for Indian stocks."""
     try:
@@ -46,16 +82,14 @@ def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
         # Calculate missing fields from available data
         total_cash = info.get("totalCash")
         total_debt = info.get("totalDebt")
-        market_cap = info.get("marketCap")
-        gross_margins = info.get("grossMargins")
         ebitda_margins = info.get("ebitdaMargins")
         net_margin = info.get("profitMargins")
         revenue_growth = info.get("revenueGrowth")
 
-        # Estimate ROE from ROA or net margin if missing
+        # Estimate ROE from net margin if missing
         roe = info.get("returnOnEquity")
         roa = info.get("returnOnAssets")
-        if roe is None and net_margin and revenue_growth is not None:
+        if roe is None and net_margin:
             roe = net_margin * 1.5  # rough estimate
 
         # Estimate current ratio from cash/debt if missing
@@ -63,47 +97,11 @@ def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
         if current_ratio is None and total_cash and total_debt:
             current_ratio = total_cash / total_debt if total_debt > 0 else 1.0
 
-        return [FinancialMetrics(
-            ticker=ticker,
-            report_period=datetime.datetime.now().strftime("%Y-%m-%d"),
-            period="ttm",
-            currency=info.get("currency", "INR"),
-            market_cap=market_cap,
-            price_to_earnings_ratio=info.get("trailingPE"),
-            price_to_book_ratio=info.get("priceToBook"),
-            price_to_sales_ratio=info.get("priceToSalesTrailing12Months"),
-            return_on_equity=roe,
-            return_on_assets=roa,
-            net_margin=net_margin,
-            operating_margin=info.get("operatingMargins") or ebitda_margins,
-            revenue_growth=revenue_growth,
-            earnings_growth=info.get("earningsGrowth") or revenue_growth,
-            current_ratio=current_ratio,
-            debt_to_equity=info.get("debtToEquity"),
-            free_cash_flow_per_share=info.get("freeCashflow"),
-            earnings_per_share=info.get("trailingEps"),
-            revenue_per_share=info.get("revenuePerShare"),
-            book_value_per_share=info.get("bookValue"),
-            dividend_yield=info.get("dividendYield"),
-        )]
-    except Exception as e:
-        logger.warning("yfinance metrics fetch failed for %s: %s", ticker, e)
-        return []
-    
-
-
-def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
-    """Fetch financial metrics using yfinance for Indian stocks."""
-    try:
-        import yfinance as yf
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        if not info:
-            return []
-
-        # Compute derived metrics from financials if available
-        gross_margin = ev_to_ebitda = ev_to_revenue = None
+        # Compute EV-based ratios from financials if available
         ev = info.get("enterpriseValue")
+        ev_to_ebitda = None
+        ev_to_revenue = None
+        gross_margin = None
         try:
             fin = stock.financials
             gross_profit = fin.loc["Gross Profit"].iloc[0] if "Gross Profit" in fin.index else None
@@ -130,10 +128,10 @@ def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
             free_cash_flow_yield=None,
             peg_ratio=info.get("pegRatio"),
             gross_margin=gross_margin,
-            operating_margin=info.get("operatingMargins"),
-            net_margin=info.get("profitMargins"),
-            return_on_equity=info.get("returnOnEquity"),
-            return_on_assets=info.get("returnOnAssets"),
+            operating_margin=info.get("operatingMargins") or ebitda_margins,
+            net_margin=net_margin,
+            return_on_equity=roe,
+            return_on_assets=roa,
             return_on_invested_capital=None,
             asset_turnover=None,
             inventory_turnover=None,
@@ -141,15 +139,15 @@ def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
             days_sales_outstanding=None,
             operating_cycle=None,
             working_capital_turnover=None,
-            current_ratio=info.get("currentRatio"),
+            current_ratio=current_ratio,
             quick_ratio=info.get("quickRatio"),
             cash_ratio=None,
             operating_cash_flow_ratio=None,
             debt_to_equity=info.get("debtToEquity"),
             debt_to_assets=None,
             interest_coverage=None,
-            revenue_growth=info.get("revenueGrowth"),
-            earnings_growth=info.get("earningsGrowth"),
+            revenue_growth=revenue_growth,
+            earnings_growth=info.get("earningsGrowth") or revenue_growth,
             book_value_growth=None,
             earnings_per_share_growth=None,
             free_cash_flow_growth=None,
@@ -161,7 +159,7 @@ def _get_yfinance_metrics(ticker: str) -> list[FinancialMetrics]:
             free_cash_flow_per_share=info.get("freeCashflow"),
         )]
     except Exception as e:
-        logger.warning("yfinance metrics failed for %s: %s", ticker, e)
+        logger.warning("yfinance metrics fetch failed for %s: %s", ticker, e)
         return []
 
 
@@ -283,9 +281,7 @@ def search_line_items(
     api_key: str = None,
 ) -> list[LineItem]:
     """Fetch line items from API."""
-    # Not available for Indian stocks via yfinance
     if _is_indian_ticker(ticker):
-        logger.info("Line items not available for Indian ticker %s via yfinance", ticker)
         return []
 
     headers = {}
@@ -330,7 +326,6 @@ def get_insider_trades(
     api_key: str = None,
 ) -> list[InsiderTrade]:
     """Fetch insider trades from cache or API."""
-    # Not available for Indian stocks
     if _is_indian_ticker(ticker):
         return []
 
@@ -396,7 +391,6 @@ def get_company_news(
     api_key: str = None,
 ) -> list[CompanyNews]:
     """Fetch company news from cache or API."""
-    # Not available for Indian stocks via this API
     if _is_indian_ticker(ticker):
         return []
 
@@ -460,7 +454,6 @@ def get_market_cap(
     api_key: str = None,
 ) -> float | None:
     """Fetch market cap from the API."""
-    # Use yfinance for Indian stocks
     if _is_indian_ticker(ticker):
         try:
             import yfinance as yf
