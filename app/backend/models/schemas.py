@@ -63,8 +63,8 @@ class BaseHedgeFundRequest(BaseModel):
     graph_nodes: List[GraphNode]
     graph_edges: List[GraphEdge]
     agent_models: Optional[List[AgentModelConfig]] = None
-    model_name: Optional[str] = "gpt-4.1"
-    model_provider: Optional[ModelProvider] = ModelProvider.OPENAI
+    model_name: Optional[str] = "llama-3.3-70b-versatile"
+    model_provider: Optional[ModelProvider] = ModelProvider.GROQ
     margin_requirement: float = 0.0
     portfolio_positions: Optional[List[PortfolioPosition]] = None
     api_keys: Optional[Dict[str, str]] = None
