@@ -169,13 +169,6 @@ IndiaAlpha/
 | Nassim Taleb | Risk, uncertainty, black swan protection |
 | Ben Graham | Father of value investing, net-nets |
 
----
-
-## License
-
-Based on the open-source [ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) project. Extended with Indian market support.
-
----
 
 *Built for Indian investors. Powered by AI. Zero cost to run.*
 
