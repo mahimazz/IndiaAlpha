@@ -53,3 +53,7 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Could not check Ollama status: {e}")
         logger.info("ℹ Ollama integration is available if you install it later")
+
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
